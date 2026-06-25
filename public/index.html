@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SmartRoute — TSP Itinerary Optimizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>SmartRoute</h1>
+    <p>Optimize multi-stop itineraries. Born from a graduation road trip across Arizona.</p>
+  </header>
+
+  <div id="layout">
+    <aside id="panel">
+      <h2>Stops</h2>
+      <div id="stop-list"></div>
+      <form id="add-stop-form">
+        <input id="stop-name" placeholder="Stop name" required />
+        <input id="stop-lat" placeholder="Lat" type="number" step="any" required />
+        <input id="stop-lng" placeholder="Lng" type="number" step="any" required />
+        <button type="submit">Add Stop</button>
+      </form>
+
+      <button id="optimize-btn">Optimize Route</button>
+      <div id="result"></div>
+
+      <h2>Suggested Detours</h2>
+      <div id="poi-list"></div>
+    </aside>
+
+    <main id="map"></main>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
