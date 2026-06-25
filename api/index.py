@@ -1,29 +1,49 @@
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs, quote
 import json
 import os
-import urllib.error
-import urllib.request
+import requests
 
+TOMTOM_SEARCH_URL = "https://api.tomtom.com/search/2/search"
 TOMTOM_ROUTE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
+
+
+def get_api_key():
+    return os.environ.get("TOMTOM_API_KEY")
 
 
 def build_locations_param(locations):
     return ":".join(f"{loc['lat']},{loc['lon']}" for loc in locations)
 
 
+def call_tomtom_search(query, api_key):
+    url = f"{TOMTOM_SEARCH_URL}/{quote(query, safe='')}.json"
+    resp = requests.get(
+        url,
+        params={"key": api_key, "limit": 5, "countrySet": "US"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def call_tomtom_route(locations, api_key):
     coords = build_locations_param(locations)
-    params = {
-        "key": api_key,
-        "computeBestOrder": "true",
-        "routeType": "fastest",
-        "traffic": "true",
-        "travelMode": "car",
-    }
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    url = f"{TOMTOM_ROUTE_URL}/{coords}/json?{query}"
-    with urllib.request.urlopen(urllib.request.Request(url), timeout=15) as resp:
-        return json.loads(resp.read().decode())
+    url = f"{TOMTOM_ROUTE_URL}/{coords}/json"
+    resp = requests.get(
+        url,
+        params={
+            "key": api_key,
+            "computeBestOrder": "true",
+            "routeType": "fastest",
+            "traffic": "true",
+            "travelMode": "car",
+            "depart": "now",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def extract_optimized_order(route, fallback_len):
@@ -55,11 +75,49 @@ class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
+    def do_GET(self):
+        query = parse_qs(urlparse(self.path).query)
+        action = (query.get("action") or [""])[0]
+
+        if action != "search":
+            self._send(400, {"error": f"Unsupported GET action: {action}"})
+            return
+
+        q = (query.get("q") or [""])[0].strip()
+        if not q:
+            self._send(200, {"results": []})
+            return
+
+        api_key = get_api_key()
+        if not api_key:
+            self._send(500, {"error": "TOMTOM_API_KEY is not configured on the server"})
+            return
+
+        try:
+            result = call_tomtom_search(q, api_key)
+        except requests.RequestException as e:
+            self._send(502, {"error": f"TomTom Search API error: {e}"})
+            return
+
+        suggestions = [
+            {
+                "name": r.get("address", {}).get("freeformAddress", q),
+                "lat": r.get("position", {}).get("lat"),
+                "lon": r.get("position", {}).get("lon"),
+            }
+            for r in result.get("results", [])
+            if r.get("position")
+        ]
+        self._send(200, {"results": suggestions})
+
     def do_POST(self):
+        query = parse_qs(urlparse(self.path).query)
+        action = (query.get("action") or ["optimize"])[0]
+
         length = int(self.headers.get("Content-Length", 0))
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -67,23 +125,24 @@ class handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "Invalid JSON body"})
             return
 
+        if action != "optimize":
+            self._send(400, {"error": f"Unsupported POST action: {action}"})
+            return
+
         locations = data.get("locations", [])
         if len(locations) < 2:
             self._send(400, {"error": "Provide at least two locations"})
             return
 
-        api_key = os.environ.get("TOMTOM_API_KEY")
+        api_key = get_api_key()
         if not api_key:
             self._send(500, {"error": "TOMTOM_API_KEY is not configured on the server"})
             return
 
         try:
             result = call_tomtom_route(locations, api_key)
-        except urllib.error.HTTPError as e:
-            self._send(e.code, {"error": f"TomTom API error: {e.read().decode()}"})
-            return
-        except urllib.error.URLError as e:
-            self._send(502, {"error": f"Failed to reach TomTom API: {e.reason}"})
+        except requests.RequestException as e:
+            self._send(502, {"error": f"TomTom Route API error: {e}"})
             return
 
         routes = result.get("routes", [])

@@ -30,12 +30,9 @@ searchInput.addEventListener("input", () => {
 
 async function fuzzySearch(query) {
   try {
-    const result = await tt.services.fuzzySearch({
-      key: TOMTOM_API_KEY,
-      query,
-      limit: 5,
-    });
-    renderSuggestions(result.results || []);
+    const res = await fetch(`/api/route?action=search&q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    renderSuggestions(data.results || []);
   } catch (err) {
     suggestionsEl.innerHTML = `<div class="suggestion-error">Search failed</div>`;
   }
@@ -46,18 +43,14 @@ function renderSuggestions(results) {
   results.forEach((r) => {
     const div = document.createElement("div");
     div.className = "suggestion";
-    div.textContent = r.address.freeformAddress;
+    div.textContent = r.name;
     div.onclick = () => addStop(r);
     suggestionsEl.appendChild(div);
   });
 }
 
 function addStop(result) {
-  stops.push({
-    name: result.address.freeformAddress,
-    lat: result.position.lat,
-    lon: result.position.lon,
-  });
+  stops.push({ name: result.name, lat: result.lat, lon: result.lon });
   searchInput.value = "";
   suggestionsEl.innerHTML = "";
   renderStops();
@@ -124,7 +117,7 @@ async function optimizeRoute() {
     return;
   }
   resultEl.textContent = "Optimizing with live traffic...";
-  const res = await fetch("/api/route", {
+  const res = await fetch("/api/route?action=optimize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ locations: stops }),
