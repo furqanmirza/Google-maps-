@@ -8,35 +8,55 @@ across Arizona — Phoenix, Sedona, the Grand Canyon, Tucson — and no good way
 to figure out the order that wouldn't waste half the day driving back and
 forth, especially with traffic changing throughout the day. I sat there
 manually reordering pins on a map app, eyeballing distances. SmartRoute is
-the tool I wished I'd had: search for your stops, get the optimal order,
-and account for live traffic conditions automatically.
+the tool I wished I'd had: search for your stops, get the optimal order, add
+a detour without breaking your itinerary, and route around traffic
+automatically.
 
-## V2 — Live Traffic Upgrade
+## V4 — The Live Traffic TSP Rerouting Engine
 
-V1 used a homegrown Haversine distance matrix and a local 2-opt heuristic.
-V2 retires all of that custom math in favor of TomTom's cloud routing
-engine:
+SmartRoute's core is no longer a static optimizer — it's a **live traffic
+TSP rerouting engine**. Every time the stop list changes (you add a stop,
+or you add a suggested detour), the *entire* trip sequence is recalculated
+from scratch by TomTom's cloud routing engine using current traffic
+conditions (`traffic=true`, `depart=now`). The route isn't just re-drawn —
+it's re-solved: TomTom's TSP engine decides whether the new stop belongs at
+the start, middle, or end of the trip, and the whole sequence is re-ordered
+to minimize total live-traffic-aware travel time. This means a bottleneck
+detected on the original route can cause stops to be visited in a
+completely different order, not just a patched-in detour.
 
-- **Seamless search** — manual lat/lng inputs are gone. A single search box
-  queries a backend proxy (`/api/route?action=search`), which calls
-  TomTom's Fuzzy Search API and returns a clean autocomplete dropdown.
-- **Native TSP + live traffic** — optimizing a route now calls
-  `/api/route?action=optimize`, which proxies to TomTom's Calculate Route
-  API with `computeBestOrder=true`, `traffic=true`, and `depart=now`,
-  so TomTom's own waypoint-ordering engine reorders stops using real-time
-  traffic conditions.
-- **Road-snapped polylines** — the optimized route geometry returned by
-  TomTom is drawn directly on a TomTom Maps Web SDK map, with the view
-  auto-fit to the full trip.
-- **Locked start banner** — a stylized note in the sidebar makes clear the
-  first stop added is the fixed origin; everything else is reordered.
+### What's new in V4
+
+1. **Context-Aware Location Search (Viewport Biasing)**
+   The main search bar now sends the current map center (`map.getCenter()`)
+   to the backend as `lat`/`lon`. The backend passes these to TomTom Search
+   with `radius=50000` (50 km), so a generic query like "Sam's Club" returns
+   the location nearest to what you're currently looking at on the map,
+   instead of a essentially random nationwide match.
+
+2. **Dynamic "Search Along Route" (Smart Detours)**
+   There is no more hardcoded list of points of interest. Once a route is
+   optimized, a "Find Along Route" search box appears. It calls a new
+   `/api/route?action=search_along_route` endpoint, which forwards your
+   route's polyline and query to **TomTom's Search Along Route API**. This
+   returns real businesses/POIs that are physically near your *actual driving
+   path*, ranked by detour time. Clicking "Add to Route" appends the stop and
+   immediately triggers a full re-optimization — the live traffic rerouting
+   engine described above — not just an insertion.
+
+3. **Explicit Traffic Rerouting UI**
+   The sidebar now surfaces a dedicated traffic banner whenever TomTom
+   reports a non-zero `trafficDelayInSeconds`, e.g. *"Live Traffic
+   Rerouting: this trip currently includes +12 min of traffic delay, already
+   factored into the optimized sequence."* The main result line still shows
+   total distance, total time, and the traffic delay component.
 
 ## Tech Stack
 
 - Frontend: static HTML/CSS/Vanilla JS + TomTom Maps SDK for Web (`public/`)
 - Backend: Python serverless function using `requests` (`api/`)
-- External APIs: TomTom Search API, TomTom Routing API (both proxied
-  server-side so the secret API key never reaches the browser)
+- External APIs: TomTom Search API (viewport-biased), TomTom Search Along
+  Route API, TomTom Routing API (`computeBestOrder` + `traffic` + `depart=now`)
 - Hosting: Vercel free tier
 
 ## Project Structure
@@ -44,11 +64,14 @@ engine:
 ```
 .
 ├── api/
-│   └── index.py        # GET ?action=search, POST ?action=optimize — proxies TomTom
+│   └── index.py        # GET ?action=search (viewport-biased)
+│                         # POST ?action=optimize (live-traffic TSP)
+│                         # POST ?action=search_along_route (smart detours)
 ├── public/
-│   ├── index.html       # TomTom Maps SDK tags + frontend key placeholder
-│   ├── style.css         # autocomplete dropdown + locked-start banner styling
-│   └── app.js             # map init, search box, polyline plotting
+│   ├── index.html       # TomTom Maps SDK tags, search bar, along-route box
+│   ├── style.css         # dropdowns, traffic banner, detour suggestion cards
+│   └── app.js             # map init, viewport-biased search, along-route search,
+│                           # traffic banner rendering, full re-optimization
 ├── requirements.txt      # requests only
 ├── vercel.json
 └── README.md
@@ -64,8 +87,6 @@ engine:
 
 ## Configuring Keys
 
-Two distinct roles for the same TomTom key:
-
 - **Frontend map key (public by design):** open `public/index.html` and
   replace:
   ```html
@@ -73,12 +94,11 @@ Two distinct roles for the same TomTom key:
     window.TOMTOM_API_KEY = "[YOUR_TOMTOM_FRONTEND_PUBLIC_KEY]";
   </script>
   ```
-  This key only initializes map tiles in the browser — it never makes
-  Search or Routing calls directly.
-- **Backend key (secret, used by the proxy):** all Search and Routing API
-  calls happen server-side in `api/index.py`, reading from the
-  `TOMTOM_API_KEY` environment variable. It is never embedded in any
-  frontend file.
+  This key only initializes map tiles in the browser.
+- **Backend key (secret, used by the proxy):** all Search, Search Along
+  Route, and Routing API calls happen server-side in `api/index.py`,
+  reading from the `TOMTOM_API_KEY` environment variable. It is never
+  embedded in any frontend file.
 
 ### Adding `TOMTOM_API_KEY` to Vercel
 
@@ -86,7 +106,7 @@ Two distinct roles for the same TomTom key:
 2. Go to **Settings → Environment Variables**.
 3. Add a new variable: Name `TOMTOM_API_KEY`, Value `<your TomTom key>`,
    scope it to Production / Preview / Development as needed.
-4. Redeploy (or trigger a new deployment) so the function picks it up.
+4. Redeploy so the function picks it up.
 
 ## Deploying to Vercel (Free Tier)
 
@@ -94,7 +114,7 @@ Two distinct roles for the same TomTom key:
    ```bash
    git init                      # if not already a repo
    git add .
-   git commit -m "SmartRoute V2: live traffic + TomTom"
+   git commit -m "SmartRoute V4: live traffic rerouting + smart detours"
    git branch -M main
    git remote add origin https://github.com/<your-username>/<your-repo>.git
    git push -u origin main
@@ -111,10 +131,12 @@ Two distinct roles for the same TomTom key:
 
 4. **Verify**
    - Visit the deployed URL
-   - Search for and add at least two stops via the search box
-   - Click **Optimize Route (Live Traffic)**
-   - Confirm the map redraws with the optimized, traffic-aware,
-     road-snapped route
+   - Pan/zoom the map, then search for a generic place name — results
+     should be biased toward your current viewport
+   - Add at least two stops, click **Optimize Route (Live Traffic)**
+   - Use **Find Along Route** to search for something like "Gas Station"
+     and click **Add to Route** — confirm the trip re-optimizes and the
+     traffic banner updates
 
 No paid services required — TomTom's free tier and Vercel's free tier
 cover this app end to end.

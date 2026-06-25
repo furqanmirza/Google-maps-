@@ -11,12 +11,18 @@ const ROUTE_SOURCE_ID = "smartroute-line";
 
 let stops = [];
 let markers = [];
+let lastPolyline = [];
 let searchDebounce = null;
+let alongRouteDebounce = null;
 
 const searchInput = document.getElementById("search-input");
 const suggestionsEl = document.getElementById("suggestions");
 const stopListEl = document.getElementById("stop-list");
 const resultEl = document.getElementById("result");
+const trafficBannerEl = document.getElementById("traffic-banner");
+const alongRouteBox = document.getElementById("along-route-box");
+const alongRouteInput = document.getElementById("along-route-input");
+const alongRouteSuggestionsEl = document.getElementById("along-route-suggestions");
 
 searchInput.addEventListener("input", () => {
   clearTimeout(searchDebounce);
@@ -30,7 +36,14 @@ searchInput.addEventListener("input", () => {
 
 async function fuzzySearch(query) {
   try {
-    const res = await fetch(`/api/route?action=search&q=${encodeURIComponent(query)}`);
+    const center = map.getCenter();
+    const params = new URLSearchParams({
+      action: "search",
+      q: query,
+      lat: center.lat,
+      lon: center.lng,
+    });
+    const res = await fetch(`/api/route?${params.toString()}`);
     const data = await res.json();
     renderSuggestions(data.results || []);
   } catch (err) {
@@ -111,6 +124,18 @@ function drawRoute(points) {
   map.fitBounds(bounds, { padding: 60 });
 }
 
+function renderTrafficBanner(travelTimeSeconds, trafficDelaySeconds) {
+  const delay = trafficDelaySeconds || 0;
+  if (delay <= 0) {
+    trafficBannerEl.classList.add("hidden");
+    trafficBannerEl.textContent = "";
+    return;
+  }
+  const delayMins = Math.round(delay / 60);
+  trafficBannerEl.classList.remove("hidden");
+  trafficBannerEl.textContent = `Live Traffic Rerouting: this trip currently includes +${delayMins} min of traffic delay, already factored into the optimized sequence.`;
+}
+
 async function optimizeRoute() {
   if (stops.length < 2) {
     resultEl.textContent = "Add at least two stops first.";
@@ -128,12 +153,72 @@ async function optimizeRoute() {
     return;
   }
   stops = data.ordered_locations;
+  lastPolyline = data.polyline || [];
   renderStops();
-  drawRoute(data.polyline);
+  drawRoute(lastPolyline);
+  renderTrafficBanner(data.travel_time_seconds, data.traffic_delay_seconds);
+
   const km = (data.distance_meters / 1000).toFixed(1);
   const mins = Math.round(data.travel_time_seconds / 60);
   const delay = Math.round((data.traffic_delay_seconds || 0) / 60);
   resultEl.textContent = `Optimized: ${km} km, ~${mins} min (incl. ${delay} min traffic delay)`;
+
+  alongRouteBox.classList.remove("hidden");
+}
+
+alongRouteInput.addEventListener("input", () => {
+  clearTimeout(alongRouteDebounce);
+  const query = alongRouteInput.value.trim();
+  if (!query) {
+    alongRouteSuggestionsEl.innerHTML = "";
+    return;
+  }
+  alongRouteDebounce = setTimeout(() => searchAlongRoute(query), 350);
+});
+
+async function searchAlongRoute(query) {
+  if (!lastPolyline.length) return;
+  alongRouteSuggestionsEl.innerHTML = `<div class="suggestion-error">Searching...</div>`;
+  try {
+    const res = await fetch("/api/route?action=search_along_route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, route: lastPolyline }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      alongRouteSuggestionsEl.innerHTML = `<div class="suggestion-error">${data.error}</div>`;
+      return;
+    }
+    renderAlongRouteSuggestions(data.results || []);
+  } catch (err) {
+    alongRouteSuggestionsEl.innerHTML = `<div class="suggestion-error">Search failed</div>`;
+  }
+}
+
+function renderAlongRouteSuggestions(results) {
+  alongRouteSuggestionsEl.innerHTML = "";
+  if (!results.length) {
+    alongRouteSuggestionsEl.innerHTML = `<div class="suggestion-error">No matches found along this route</div>`;
+    return;
+  }
+  results.forEach((r) => {
+    const row = document.createElement("div");
+    row.className = "along-route-suggestion";
+    row.innerHTML = `<span>${r.name} (+${r.detour_minutes} min detour)</span>`;
+    const btn = document.createElement("button");
+    btn.textContent = "Add to Route";
+    btn.onclick = () => addDetourStop(r);
+    row.appendChild(btn);
+    alongRouteSuggestionsEl.appendChild(row);
+  });
+}
+
+async function addDetourStop(result) {
+  stops.push({ name: result.name, lat: result.lat, lon: result.lon });
+  alongRouteInput.value = "";
+  alongRouteSuggestionsEl.innerHTML = "";
+  await optimizeRoute();
 }
 
 document.getElementById("optimize-btn").addEventListener("click", optimizeRoute);
