@@ -6,25 +6,30 @@ In May, my parents flew in for my graduation. Between the ceremony, family
 dinners, and showing them around, we ended up with a list of stops scattered
 across Arizona — Phoenix, Sedona, the Grand Canyon, Tucson — and no good way
 to figure out the order that wouldn't waste half the day driving back and
-forth. I sat there manually reordering pins on a map app, eyeballing
-distances. SmartRoute is the tool I wished I'd had: drop in your stops, get
-the optimal route, and get nudged toward worthwhile detours along the way.
+forth, especially with traffic changing throughout the day. I sat there
+manually reordering pins on a map app, eyeballing distances. SmartRoute is
+the tool I wished I'd had: search for your stops, get the optimal order,
+and account for live traffic conditions automatically.
 
 ## What It Does
 
-1. **Dynamic Stop Reordering** — enter an unordered list of stops; a Python
-   serverless function computes the optimal visiting order (nearest-neighbor
-   + 2-opt heuristic TSP solver).
-2. **Smart POI Suggestions** — once the route is optimized, nearby points of
-   interest within a small detour radius of the route polyline are surfaced.
-3. **Low-Impact Detour Addition** — add a suggested POI and the backend
-   reinserts it at the position that adds the least extra distance, then
-   re-optimizes.
+1. **Seamless Location Search** — type into the search bar to get live
+   address/place suggestions via the TomTom Search API (Fuzzy Search);
+   clicking a result adds it as a stop with saved coordinates.
+2. **Native TSP Solver + Live Traffic** — stops are sent to a Python
+   serverless function, which calls the TomTom Calculate Route API with
+   `computeBestOrder=true` (TomTom's native waypoint-order optimizer) and
+   `traffic=true` (live traffic-aware routing).
+3. **Map Display** — the optimized route polyline is rendered on a TomTom
+   Maps Web SDK map.
+4. **Locked Start** — the first stop you add is always treated as your
+   fixed starting origin; the UI calls this out explicitly.
 
 ## Tech Stack
 
-- Frontend: static HTML/CSS/Vanilla JS + Leaflet.js (`public/`)
+- Frontend: static HTML/CSS/Vanilla JS + TomTom Maps SDK for Web (`public/`)
 - Backend: Python serverless function, standard library only (`api/`)
+- External APIs: TomTom Search API, TomTom Routing API
 - Hosting: Vercel free tier
 
 ## Project Structure
@@ -32,15 +37,40 @@ the optimal route, and get nudged toward worthwhile detours along the way.
 ```
 .
 ├── api/
-│   └── index.py        # TSP solver + POI suggestion endpoint
+│   └── index.py        # Calls TomTom Calculate Route (computeBestOrder + traffic)
 ├── public/
-│   ├── index.html
+│   ├── index.html       # TomTom SDK script/css tags + API key placeholder
 │   ├── style.css
-│   └── app.js
-├── requirements.txt
+│   └── app.js            # Map init, fuzzy search dropdown, route drawing
+├── requirements.txt      # empty — stdlib urllib only
 ├── vercel.json
 └── README.md
 ```
+
+## Getting a Free TomTom API Key (No Credit Card)
+
+1. Go to https://developer.tomtom.com/ and click **Get a free API key**.
+2. Sign up with just an email address — no credit card is required for the
+   free tier (2,500 free daily requests across Search/Routing/Maps).
+3. In the TomTom Developer Portal, go to **My Apps** → create a new app.
+4. Copy the generated API key.
+5. Optionally restrict the key to your deployed domain under app settings
+   for production use.
+
+## Configuring the Key
+
+This app uses the **same TomTom key in two places**:
+
+- **Frontend (client-side, public by design):** open `public/index.html`
+  and replace the placeholder:
+  ```html
+  <script>
+    window.TOMTOM_API_KEY = "YOUR_TOMTOM_API_KEY";
+  </script>
+  ```
+- **Backend (server-side, kept secret):** set an environment variable named
+  `TOMTOM_API_KEY` in your Vercel project (see below) — never hardcode it
+  in `api/index.py`.
 
 ## Deploying to Vercel (Free Tier)
 
@@ -61,14 +91,17 @@ the optimal route, and get nudged toward worthwhile detours along the way.
    - Leave build/output settings at defaults — `public/` is served as
      static assets and `api/index.py` is auto-detected as a Python
      serverless function
-   - Click **Deploy**
 
-3. **Verify**
+3. **Add the environment variable**
+   - In the Vercel project → **Settings → Environment Variables**
+   - Add `TOMTOM_API_KEY` = `<your TomTom key>` for Production/Preview/Dev
+   - Click **Deploy** (or redeploy if you already deployed)
+
+4. **Verify**
    - Visit the deployed URL
-   - Add a few stops, click "Optimize Route"
-   - Confirm the map redraws with the optimized polyline and suggested
-     detours appear in the sidebar
+   - Search for and add at least two stops
+   - Click **Optimize Route (Live Traffic)**
+   - Confirm the map redraws with the optimized, traffic-aware route
 
-No environment variables, API keys, or paid services required — everything
-runs on Vercel's free tier using open-source mapping (OpenStreetMap tiles
-via Leaflet) and a self-contained Python heuristic solver.
+No paid services required — TomTom's free tier and Vercel's free tier
+cover this MVP end to end.

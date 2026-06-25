@@ -1,22 +1,81 @@
-const map = L.map("map").setView([34.0489, -111.0937], 7);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap contributors",
-}).addTo(map);
+const TOMTOM_API_KEY = window.TOMTOM_API_KEY;
+
+const map = tt.map({
+  key: TOMTOM_API_KEY,
+  container: "map",
+  center: [-111.0937, 34.0489],
+  zoom: 6,
+});
+
+const ROUTE_SOURCE_ID = "smartroute-line";
 
 let stops = [];
-let routeLine = null;
 let markers = [];
+let searchDebounce = null;
 
+const searchInput = document.getElementById("search-input");
+const suggestionsEl = document.getElementById("suggestions");
 const stopListEl = document.getElementById("stop-list");
-const poiListEl = document.getElementById("poi-list");
 const resultEl = document.getElementById("result");
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchDebounce);
+  const query = searchInput.value.trim();
+  if (!query) {
+    suggestionsEl.innerHTML = "";
+    return;
+  }
+  searchDebounce = setTimeout(() => fuzzySearch(query), 300);
+});
+
+async function fuzzySearch(query) {
+  try {
+    const result = await tt.services.fuzzySearch({
+      key: TOMTOM_API_KEY,
+      query,
+      limit: 5,
+    });
+    renderSuggestions(result.results || []);
+  } catch (err) {
+    suggestionsEl.innerHTML = `<div class="suggestion-error">Search failed</div>`;
+  }
+}
+
+function renderSuggestions(results) {
+  suggestionsEl.innerHTML = "";
+  results.forEach((r) => {
+    const div = document.createElement("div");
+    div.className = "suggestion";
+    div.textContent = r.address.freeformAddress;
+    div.onclick = () => addStop(r);
+    suggestionsEl.appendChild(div);
+  });
+}
+
+function addStop(result) {
+  stops.push({
+    name: result.address.freeformAddress,
+    lat: result.position.lat,
+    lon: result.position.lon,
+  });
+  searchInput.value = "";
+  suggestionsEl.innerHTML = "";
+  renderStops();
+}
+
+function clearMarkers() {
+  markers.forEach((m) => m.remove());
+  markers = [];
+}
 
 function renderStops() {
   stopListEl.innerHTML = "";
+  clearMarkers();
   stops.forEach((s, i) => {
     const row = document.createElement("div");
     row.className = "stop";
-    row.innerHTML = `<span>${i + 1}. ${s.name}</span>`;
+    const label = i === 0 ? `${s.name} (Origin)` : s.name;
+    row.innerHTML = `<span>${i + 1}. ${label}</span>`;
     const btn = document.createElement("button");
     btn.textContent = "Remove";
     btn.onclick = () => {
@@ -25,45 +84,38 @@ function renderStops() {
     };
     row.appendChild(btn);
     stopListEl.appendChild(row);
-  });
-}
 
-function clearMapLayers() {
-  markers.forEach((m) => map.removeLayer(m));
-  markers = [];
-  if (routeLine) {
-    map.removeLayer(routeLine);
-    routeLine = null;
-  }
-}
-
-function drawRoute(ordered) {
-  clearMapLayers();
-  const latlngs = ordered.map((p) => [p.lat, p.lng]);
-  ordered.forEach((p, i) => {
-    const marker = L.marker([p.lat, p.lng]).addTo(map).bindPopup(`${i + 1}. ${p.name}`);
+    const marker = new tt.Marker().setLngLat([s.lon, s.lat]).addTo(map);
     markers.push(marker);
   });
-  routeLine = L.polyline(latlngs, { color: "#1f6f54", weight: 4 }).addTo(map);
-  map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
 }
 
-function renderPois(pois) {
-  poiListEl.innerHTML = "";
-  if (!pois.length) {
-    poiListEl.innerHTML = "<p style='font-size:.8rem;color:#666;'>No nearby detours found.</p>";
-    return;
-  }
-  pois.forEach((p) => {
-    const row = document.createElement("div");
-    row.className = "poi";
-    row.innerHTML = `<span>${p.name} (+${p.detour_km} km)</span>`;
-    const btn = document.createElement("button");
-    btn.textContent = "Add";
-    btn.onclick = () => addPoi(p);
-    row.appendChild(btn);
-    poiListEl.appendChild(row);
+function clearRouteLayer() {
+  if (map.getLayer(ROUTE_SOURCE_ID)) map.removeLayer(ROUTE_SOURCE_ID);
+  if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
+}
+
+function drawRoute(points) {
+  clearRouteLayer();
+  if (!points.length) return;
+  const coordinates = points.map((p) => [p.lon, p.lat]);
+
+  map.addSource(ROUTE_SOURCE_ID, {
+    type: "geojson",
+    data: { type: "Feature", geometry: { type: "LineString", coordinates } },
   });
+  map.addLayer({
+    id: ROUTE_SOURCE_ID,
+    type: "line",
+    source: ROUTE_SOURCE_ID,
+    paint: { "line-color": "#1f6f54", "line-width": 5 },
+  });
+
+  const bounds = coordinates.reduce(
+    (b, c) => b.extend(c),
+    new tt.LngLatBounds(coordinates[0], coordinates[0])
+  );
+  map.fitBounds(bounds, { padding: 60 });
 }
 
 async function optimizeRoute() {
@@ -71,11 +123,11 @@ async function optimizeRoute() {
     resultEl.textContent = "Add at least two stops first.";
     return;
   }
-  resultEl.textContent = "Optimizing...";
+  resultEl.textContent = "Optimizing with live traffic...";
   const res = await fetch("/api/route", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "optimize", locations: stops }),
+    body: JSON.stringify({ locations: stops }),
   });
   const data = await res.json();
   if (data.error) {
@@ -84,46 +136,11 @@ async function optimizeRoute() {
   }
   stops = data.ordered_locations;
   renderStops();
-  drawRoute(stops);
-  renderPois(data.suggested_pois || []);
-  resultEl.textContent = `Optimized! Total distance: ${data.total_distance_km} km`;
+  drawRoute(data.polyline);
+  const km = (data.distance_meters / 1000).toFixed(1);
+  const mins = Math.round(data.travel_time_seconds / 60);
+  const delay = Math.round((data.traffic_delay_seconds || 0) / 60);
+  resultEl.textContent = `Optimized: ${km} km, ~${mins} min (incl. ${delay} min traffic delay)`;
 }
-
-async function addPoi(poi) {
-  resultEl.textContent = "Adding detour...";
-  const res = await fetch("/api/route", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "add_poi", locations: stops, poi }),
-  });
-  const data = await res.json();
-  if (data.error) {
-    resultEl.textContent = data.error;
-    return;
-  }
-  stops = data.ordered_locations;
-  renderStops();
-  drawRoute(stops);
-  resultEl.textContent = `Added ${poi.name} (+${data.added_detour_km} km). Total: ${data.total_distance_km} km`;
-  poiListEl.innerHTML = "";
-}
-
-document.getElementById("add-stop-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const name = document.getElementById("stop-name").value.trim();
-  const lat = parseFloat(document.getElementById("stop-lat").value);
-  const lng = parseFloat(document.getElementById("stop-lng").value);
-  stops.push({ name, lat, lng });
-  renderStops();
-  e.target.reset();
-});
 
 document.getElementById("optimize-btn").addEventListener("click", optimizeRoute);
-
-stops = [
-  { name: "Phoenix Sky Harbor", lat: 33.4352, lng: -112.0101 },
-  { name: "Flagstaff", lat: 35.1983, lng: -111.6513 },
-  { name: "Tucson", lat: 32.2226, lng: -110.9747 },
-  { name: "Page", lat: 36.9147, lng: -111.4558 },
-];
-renderStops();
